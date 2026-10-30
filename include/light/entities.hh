@@ -61,6 +61,8 @@ enum light_formula_t
 class light_t : public settings::setting_container
 {
 public:
+    bool area_weighted = false;
+    float sample_weight = 1.0f;
     bool spotlight = false;
     qvec3f spotvec{}; // computed
     float spotfalloff = 0;

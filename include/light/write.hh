@@ -55,6 +55,15 @@ public:
     qvec3b quantize(const qvec3f &color, uint32_t face, uint32_t s, uint32_t t, bool dither);
 };
 
+enum class lightmap_filter_t;
+// Samples belong to one surface, not a packed lightmap atlas.
+std::vector<qvec4f> ReconstructLightmap(const std::vector<qvec4f> &input, int width, int height,
+    int factor, lightmap_filter_t filter);
+
+qvec3f EncodeLightmapColor(const qvec3f &color, float gamma, bool monochrome, bool linearfilter);
+
+qvec3f LightmapLuminance(const qvec3f &color);
+
 uint8_t QuantizeLight(float value, float threshold);
 float LightDitherThreshold(uint32_t face, uint32_t s, uint32_t t);
 

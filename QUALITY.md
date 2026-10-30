@@ -15,6 +15,8 @@ Full VIS is already the normal VIS mode; do not use `-fast` for a final compile.
 | Control | Upstream default | high | max |
 |---|---:|---:|---:|
 | Samples per luxel | 1 | 16×16 (256) | 32×32 (1024) |
+| Sample placement | regular grid | deterministic stratified | deterministic stratified |
+| Reconstruction | box average | Mitchell | Mitchell |
 | Sun/sky target samples | 64 | 1024 | 4096 |
 | AO angular grid, when AO is enabled | 16×3 | 32×6 | 64×12 |
 | Light contribution gate | 0.001 | 0 | 0 |
@@ -88,8 +90,92 @@ supersampling aliases, dither statistics, error-diffusion mean preservation, and
 actual Quake 1 compiles confirming that 16×16 and 32×32 keep the lightmap size.
 Visual quality and compile cost should still be assessed on representative maps.
 
-Local validation: Release build with GCC 13, Embree 4.4.1 and oneTBB;
+Initial fork validation (before the reconstruction/enhanced-look additions):
+Release build with GCC 13, Embree 4.4.1 and oneTBB;
 398 tests ran, 382 passed, 16 upstream tests skipped. This includes seven HQ
 regression tests and real high/max preset compiles. A separate eight-thread
 `qbsp -quality max` → full `vis` → `light -quality max -lit` smoke compile passed
 on `q1_lightignore.map`. In-engine visual A/B review remains pending.
+
+
+## Richer lighting in the same low-resolution monochrome map
+
+```sh
+qbsp -quality max map.map
+vis map.bsp
+light -look enhanced map.bsp
+```
+
+`-look enhanced` implies max sampling quality, grayscale output, two indirect
+bounces, full texture-color reflectance for bounce calculations, and finite-size
+positive light sources. Original textures remain unchanged. Bounce uses each
+texture's average color; it does not infer height or occlusion from painted details.
+The final filtered RGB illumination is converted to Rec.709-weighted luminance,
+then gamma-encoded (if requested) and dithered/error-diffused into the original
+8-bit monochrome lightmap. A .lit file
+is not automatically enabled in monochrome mode; explicitly requesting one writes
+grayscale RGB data. Lightmap dimensions, BSP version and renderer remain unchanged.
+
+Finite sources default to an 8-world-unit radius with 64 samples. The deterministic
+sphere sequence uses antipodal pairs to preserve its center before clipping.
+Generated positions are clipped to the source's side of shadow-casting walls.
+Per-sample energy is normalized after attenuation, preserving the brightness and
+reach of linear lights as well as inverse/inverse-square lights. This normalization
+is specific to the enhanced look; legacy light behavior remains available.
+Authored `_deviance` and `_samples` override these source defaults. Sun/dome,
+negative and non-additive minimum lights do not receive automatic finite radii.
+
+AO remains disabled by default: geometric visibility already occludes bounced
+light, and a separate AO multiplier can over-darken it. This remains the existing
+surface-emitter radiosity solver, not a full path tracer.
+
+Explicit CLI values override presets regardless of argument order. Authored map
+keys retain precedence over implied preset defaults. Useful controls include:
+
+```sh
+light -look enhanced -light_radius 4 -light_samples 128 map.bsp
+light -look enhanced -bounce 3 map.bsp
+light -look enhanced -light_radius 0 map.bsp
+light -look enhanced -monochrome 0 -lit map.bsp
+light -quality max -filter lanczos3 map.bsp
+light -extra32 -filter mitchell -samplepattern stratified -monochrome -noiseshape map.bsp
+```
+
+The source-sample count multiplies the receiver-sample cost. The enhanced defaults
+can be very expensive on large maps. `-samples 8` can be used for a quicker preview
+while keeping the final lightmap resolution exactly the same.
+
+### Reconstruction filters
+
+- `box`: original upstream texel-footprint average, retained unchanged.
+- `tent`: positive-weight smoothing over a one-luxel radius.
+- `mitchell`: Mitchell-Netravali cubic, B=C=1/3, over a two-luxel radius. Selected
+  for both quality presets as a practical smoothing/sharpness compromise.
+- `lanczos3`: windowed sinc over a three-luxel radius. Available for sharper
+  reconstruction; it can emphasize ringing around high-contrast shadows.
+
+The new filters use separable double-precision accumulation, normalize weights,
+retain validity masks, extend each surface's border independently, and clamp
+negative-lobe overshoot to the input footprint's color range without clipping HDR
+to 255. Light direction vectors retain upstream box downsampling. A factor of 1
+bypasses filtering. The normal legacy defaults remain grid sampling and box filtering.
+
+Stratified placement takes one deterministic jittered sample in each supersample
+cell, reducing regular-grid correlation. It is reproducible for a fixed BSP
+regardless of worker scheduling. Reconstruction improves the estimate stored in
+each texel; it cannot recover details smaller than the existing lightmap can carry.
+It also does not antialias geometry silhouettes, which require renderer support.
+
+
+Quality presets, non-box reconstruction, and monochrome output also imply
+`-linearfilter`: non-default gamma is applied after sample integration and final
+luminance conversion, rather than to each supersample. `-linearfilter 0` restores
+the old gamma-before-filter order. The legacy default path remains unchanged.
+Coplanar seam stitching and replacing the fixed surface-ray offset are not part
+of this change; those need dedicated topology/visibility regression cases.
+
+Enhanced-look validation: Release build passed 391 tests with 16 upstream skips
+(407 total). New coverage includes constant/HDR preservation, shadow-edge filter
+coverage, invalid samples, bounded ringing, deterministic sample bounds/centroid,
+linear-light gamma order, grayscale output, and source energy conservation.
+Small-map enhanced-look integration compiles pass at unchanged resolution.

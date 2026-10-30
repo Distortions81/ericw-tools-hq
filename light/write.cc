@@ -201,6 +201,119 @@ static std::vector<qvec4f> IntegerDownsampleImage(const std::vector<qvec4f> &inp
     return res;
 }
 
+namespace
+{
+double ReconstructionWeight(double distance, lightmap_filter_t filter)
+{
+    const double x = std::abs(distance);
+    if (filter == lightmap_filter_t::TENT)
+        return std::max(0.0, 1.0 - x);
+    if (filter == lightmap_filter_t::MITCHELL) {
+        // Mitchell-Netravali, B = C = 1/3. Support is two output luxels.
+        if (x < 1)
+            return ((7.0 / 6 * x - 2.0) * x * x) + 8.0 / 9;
+        if (x < 2)
+            return ((-7.0 / 18 * x + 2.0) * x - 10.0 / 3) * x + 16.0 / 9;
+        return 0;
+    }
+    // Windowed sinc, support three output luxels.
+    if (x >= 3)
+        return 0;
+    if (x < 1e-12)
+        return 1;
+    constexpr double pi = 3.14159265358979323846;
+    return (std::sin(pi * x) / (pi * x)) * (std::sin(pi * x / 3) / (pi * x / 3));
+}
+
+using reconstruction_taps_t = std::vector<std::vector<std::pair<int, double>>>;
+reconstruction_taps_t ReconstructionTaps(int input_size, int factor, lightmap_filter_t filter)
+{
+    const int radius = filter == lightmap_filter_t::TENT ? 1 : filter == lightmap_filter_t::MITCHELL ? 2 : 3;
+    reconstruction_taps_t result(input_size / factor);
+    for (int out = 0; out < input_size / factor; ++out) {
+        // CalcPoints places subluxel samples at (i + .5) / factor - .5.
+        const double center = (out + 0.5) * factor - 0.5;
+        const int first = static_cast<int>(std::ceil(center - radius * factor));
+        const int last = static_cast<int>(std::floor(center + radius * factor));
+        double sum = 0;
+        for (int i = first; i <= last; ++i) {
+            const double weight = ReconstructionWeight((i - center) / factor, filter);
+            if (std::abs(weight) < 1e-15)
+                continue;
+            // Extend this surface's border. Never read a neighbouring atlas allocation.
+            const int index = std::clamp(i, 0, input_size - 1);
+            if (!result[out].empty() && result[out].back().first == index)
+                result[out].back().second += weight;
+            else
+                result[out].emplace_back(index, weight);
+            sum += weight;
+        }
+        for (auto &[index, weight] : result[out])
+            weight /= sum;
+    }
+    return result;
+}
+
+struct reconstruction_sample_t
+{
+    qvec4d valid{0}; // premultiplied color and signed validity weight
+    qvec3d all{0};
+    qvec3f minimum{std::numeric_limits<float>::max()};
+    qvec3f maximum{std::numeric_limits<float>::lowest()};
+};
+} // namespace
+
+std::vector<qvec4f> ReconstructLightmap(
+    const std::vector<qvec4f> &input, int w, int h, int factor, lightmap_filter_t filter)
+{
+    if (w <= 0 || h <= 0 || factor <= 0 || w % factor || h % factor ||
+        input.size() != static_cast<size_t>(w) * h)
+        throw std::invalid_argument("invalid supersampled lightmap dimensions");
+    if (filter == lightmap_filter_t::BOX || factor == 1)
+        return IntegerDownsampleImage(input, w, h, factor);
+
+    const int outw = w / factor, outh = h / factor;
+    const auto xtaps = ReconstructionTaps(w, factor, filter);
+    const auto ytaps = ReconstructionTaps(h, factor, filter);
+    // Separable filtering preserves the full 2D signed kernel and validity mask,
+    // without normalizing or clamping between passes. Accumulate in double precision.
+    std::vector<reconstruction_sample_t> horizontal(static_cast<size_t>(outw) * h);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < outw; ++x) {
+            auto &sum = horizontal[static_cast<size_t>(y) * outw + x];
+            for (const auto &[i, weight] : xtaps[x]) {
+                const auto &sample = input[static_cast<size_t>(y) * w + i];
+                const qvec3d color(sample.xyz());
+                const double valid = sample[3] != 0 ? 1.0 : 0.0;
+                sum.valid += qvec4d(color[0] * valid, color[1] * valid, color[2] * valid, valid) * weight;
+                sum.all += color * weight;
+                sum.minimum = qv::min(sum.minimum, sample.xyz());
+                sum.maximum = qv::max(sum.maximum, sample.xyz());
+            }
+        }
+    }
+    std::vector<qvec4f> result(static_cast<size_t>(outw) * outh);
+    for (int y = 0; y < outh; ++y) {
+        for (int x = 0; x < outw; ++x) {
+            reconstruction_sample_t sum;
+            for (const auto &[i, weight] : ytaps[y]) {
+                const auto &sample = horizontal[static_cast<size_t>(i) * outw + x];
+                sum.valid += sample.valid * weight;
+                sum.all += sample.all * weight;
+                sum.minimum = qv::min(sum.minimum, sample.minimum);
+                sum.maximum = qv::max(sum.maximum, sample.maximum);
+            }
+            const bool valid = sum.valid[3] > 1e-8;
+            const qvec3f color(valid ? sum.valid.xyz() / sum.valid[3] : sum.all);
+            // Bound negative-lobe overshoot to the input footprint's color range.
+            // This avoids negative lighting and new overbright halos without clipping HDR to 255.
+            const qvec3f bounded = qv::min(qv::max(color, sum.minimum), sum.maximum);
+            result[static_cast<size_t>(y) * outw + x] = qvec4f(bounded[0], bounded[1], bounded[2], valid ? 1 : 0);
+        }
+    }
+    return result;
+}
+
 static std::vector<qvec4f> FloodFillTransparent(const std::vector<qvec4f> &input, int w, int h)
 {
     // transparent pixels take the average of their neighbours.
@@ -361,6 +474,21 @@ float LightDitherThreshold(uint32_t face, uint32_t s, uint32_t t)
     return ((hash >> 9) + 0.5f) / 8388608.0f;
 }
 
+qvec3f LightmapLuminance(const qvec3f &color)
+{
+    return qvec3f{qv::dot(color, qvec3f{0.2126f, 0.7152f, 0.0722f})};
+}
+
+qvec3f EncodeLightmapColor(const qvec3f &color, float gamma, bool monochrome, bool linearfilter)
+{
+    qvec3f result = monochrome ? LightmapLuminance(color) : color;
+    if (linearfilter && gamma != 1.0f) {
+        for (auto &component : result)
+            component = std::pow(std::max(0.0f, component) / 255.0f, 1.0f / gamma) * 255.0f;
+    }
+    return result;
+}
+
 uint8_t QuantizeLight(float value, float threshold)
 {
     return static_cast<uint8_t>(std::floor(std::clamp(value + threshold, 0.0f, 255.0f)));
@@ -424,7 +552,8 @@ static void WriteSingleLightmap(const mbsp_t *bsp, const mface_t *face, const li
     }
 
     const std::vector<qvec4f> output_color =
-        IntegerDownsampleImage(fullres, oversampled_width, oversampled_height, light_options.extra.value());
+        ReconstructLightmap(fullres, oversampled_width, oversampled_height, light_options.extra.value(),
+            light_options.filter.value());
     std::optional<std::vector<qvec4f>> output_dir;
 
     if (lux) {
@@ -445,6 +574,9 @@ static void WriteSingleLightmap(const mbsp_t *bsp, const mface_t *face, const li
 
             if (lit || out) {
                 qvec4f color = output_color.at(sampleindex);
+                const auto encoded = EncodeLightmapColor(color.xyz(), lightsurf->cfg->lightmapgamma.value(),
+                    light_options.monochrome.value(), light_options.linearfilter.value());
+                color = qvec4f(encoded[0], encoded[1], encoded[2], color[3]);
 
                 if (hdr) {
                     uint32_t c = HDR_PackE5BRG9(color / HDR_ONE);
@@ -553,6 +685,9 @@ static void WriteSingleLightmap_FromDecoupled(const mbsp_t *bsp, const mface_t *
                     mix(tex(coord_floor_x, coord_floor_y + 1), tex(coord_floor_x + 1, coord_floor_y + 1), coord_frac_x),
                     coord_frac_y);
 
+            const auto encoded = EncodeLightmapColor(color.xyz(), lightsurf->cfg->lightmapgamma.value(),
+                light_options.monochrome.value(), light_options.linearfilter.value());
+            color = qvec4f(encoded[0], encoded[1], encoded[2], color[3]);
             if (hdr) {
                 uint32_t c = HDR_PackE5BRG9(color / HDR_ONE);
                 // Write uint32 in little-endian
@@ -627,7 +762,7 @@ inline void LightFace_ScaleAndClamp(lightsurf_t *lightsurf)
             /* Scale and handle gamma adjustment */
             color *= cfg.rangescale.value();
 
-            if (cfg.lightmapgamma.value() != 1.0f) {
+            if (cfg.lightmapgamma.value() != 1.0f && !light_options.linearfilter.value()) {
                 for (auto &c : color) {
                     c = pow(c / 255.0f, 1.0f / cfg.lightmapgamma.value()) * 255.0f;
                 }

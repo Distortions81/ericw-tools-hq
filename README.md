@@ -1,7 +1,8 @@
 # ericw-tools HQ fork
 
-Opt-in 16x16 / 32x32 sampling, floating-point lighting through final quantization,
-dithering and error diffusion, and precise BSP search at existing resolution.
+Opt-in 16x16 / 32x32 stratified sampling, Mitchell/Lanczos reconstruction,
+monochrome soft-source and texture-aware bounce lighting, dithering/error diffusion,
+and precise BSP search at existing resolution.
 See [QUALITY.md](QUALITY.md) for usage, costs, and compatibility.
 
 ## ericw-tools

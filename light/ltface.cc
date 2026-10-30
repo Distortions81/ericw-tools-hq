@@ -26,6 +26,7 @@
 #include <light/entities.hh>
 #include <light/lightgrid.hh>
 #include <light/trace.hh>
+#include <light/sampling.hh>
 #include <light/write.hh> // for facesup_t
 
 #include <common/imglib.hh>
@@ -439,8 +440,13 @@ static void CalcPoints(
             const int i = t * surf->width + s;
             auto &sample = surf->samples[i];
 
-            const float us = starts + s * st_step;
-            const float ut = startt + t * st_step;
+            qvec2f uv{starts + s * st_step, startt + t * st_step};
+            if (light_options.extra.value() > 1 &&
+                light_options.samplepattern.value() == sample_pattern_t::STRATIFIED) {
+                uv = StratifiedLightmapOffset(s, t, light_options.extra.value(),
+                    LightSampleHash(static_cast<uint32_t>(face->planenum)));
+            }
+            const float us = uv[0], ut = uv[1];
 
             sample.point =
                 surf->extents.LMCoordToWorld(qvec2f(us, ut)) + surf->plane.normal; // one unit in front of face
@@ -886,7 +892,7 @@ static float GetLightValueWithAngle(const settings::worldspawn_keys &cfg, const 
 static float GetLightValue(const settings::worldspawn_keys &cfg, const light_t *entity, const float dist)
 {
     return GetLightValue(cfg, entity->getFormula(), entity->light.value(), entity->falloff.value(),
-        entity->atten.value(), dist, LF_SCALE);
+        entity->atten.value(), dist, LF_SCALE) * entity->sample_weight;
 }
 
 static float GetLightValueWithAngle(const settings::worldspawn_keys &cfg, const light_t *entity, const qvec3f &surfnorm,
@@ -912,7 +918,7 @@ static float GetLightValueWithAngle(const settings::worldspawn_keys &cfg, const 
         }
     }
 
-    return value * spotscale;
+    return value * spotscale * entity->sample_weight;
 }
 
 template<typename T>

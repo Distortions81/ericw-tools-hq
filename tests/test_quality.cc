@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <light/light.hh>
+#include <light/sampling.hh>
+#include <light/entities.hh>
 #include <light/ltface.hh>
 #include <light/write.hh>
 #include <qbsp/qbsp.hh>
@@ -108,4 +110,140 @@ TEST(quality, AmbientOcclusionGridIsConfigurable)
     SetupDirt(cfg);
     EXPECT_EQ(numDirtVectors, 768);
     light_reset();
+}
+
+TEST(quality, ReconstructionPreservesDimensionsConstantAndHdr)
+{
+    for (auto filter : {lightmap_filter_t::BOX, lightmap_filter_t::TENT,
+        lightmap_filter_t::MITCHELL, lightmap_filter_t::LANCZOS3}) {
+        const std::vector<qvec4f> input(24 * 16, qvec4f{512, 42, 7, 1});
+        const auto output = ReconstructLightmap(input, 24, 16, 4, filter);
+        ASSERT_EQ(output.size(), 6 * 4);
+        for (const auto &sample : output) {
+            EXPECT_FLOAT_EQ(sample[0], 512);
+            EXPECT_FLOAT_EQ(sample[1], 42);
+            EXPECT_FLOAT_EQ(sample[2], 7);
+            EXPECT_FLOAT_EQ(sample[3], 1);
+        }
+    }
+    EXPECT_THROW(ReconstructLightmap({}, 0, 16, 4, lightmap_filter_t::MITCHELL), std::invalid_argument);
+}
+
+TEST(quality, ReconstructionSmoothsCoverageAndBoundsRinging)
+{
+    std::vector<qvec4f> input(64 * 8);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 64; ++x)
+            input[y * 64 + x] = qvec4f(x >= 32 ? 100.0f : 0.0f, 0, 0, 1);
+    const auto box = ReconstructLightmap(input, 64, 8, 4, lightmap_filter_t::BOX);
+    EXPECT_FLOAT_EQ(box[7][0], 0);
+    EXPECT_FLOAT_EQ(box[8][0], 100);
+    for (auto filter : {lightmap_filter_t::TENT, lightmap_filter_t::MITCHELL, lightmap_filter_t::LANCZOS3}) {
+        const auto filtered = ReconstructLightmap(input, 64, 8, 4, filter);
+        EXPECT_GT(filtered[7][0], 0);
+        EXPECT_LT(filtered[8][0], 100);
+        for (const auto &sample : filtered) {
+            EXPECT_GE(sample[0], 0);
+            EXPECT_LE(sample[0], 100);
+            EXPECT_FLOAT_EQ(sample[1], 0);
+        }
+    }
+}
+
+TEST(quality, ReconstructionHandlesInvalidSamples)
+{
+    for (auto filter : {lightmap_filter_t::TENT, lightmap_filter_t::MITCHELL, lightmap_filter_t::LANCZOS3}) {
+        const std::vector<qvec4f> input(16 * 16, qvec4f{40, 40, 40, 0});
+        const auto output = ReconstructLightmap(input, 16, 16, 4, filter);
+        for (const auto &sample : output) {
+            EXPECT_FLOAT_EQ(sample[0], 40);
+            EXPECT_FLOAT_EQ(sample[3], 0);
+        }
+    }
+}
+
+
+TEST(quality, StratifiedSamplesStayInsideTheirCells)
+{
+    for (int t = 0; t < 64; ++t) {
+        for (int s = 0; s < 64; ++s) {
+            const auto uv = StratifiedLightmapOffset(s, t, 32, 42);
+            EXPECT_GT(uv[0], s / 32.0f - 0.5f);
+            EXPECT_LT(uv[0], (s + 1) / 32.0f - 0.5f);
+            EXPECT_GT(uv[1], t / 32.0f - 0.5f);
+            EXPECT_LT(uv[1], (t + 1) / 32.0f - 0.5f);
+            EXPECT_EQ(uv, StratifiedLightmapOffset(s, t, 32, 42));
+        }
+    }
+}
+
+TEST(quality, AreaSamplesStayInSphereAndPreserveCentroid)
+{
+    for (int count : {1, 2, 3, 16, 63, 64}) {
+        qvec3f sum{0};
+        for (int i = 0; i < count; ++i) {
+            const auto offset = PairedAreaLightOffset(i, count, 123);
+            EXPECT_LE(qv::length(offset), 1);
+            sum += offset;
+        }
+        EXPECT_NEAR(qv::length(sum), 0, 1e-5);
+    }
+}
+
+TEST(quality, EnhancedLookKeepsMonochromeResolutionAndAoOptional)
+{
+    settings::light_settings cfg;
+    cfg.look.set_value(lightmap_look_t::ENHANCED, settings::source::COMMANDLINE);
+    cfg.bounce.set_value(1, settings::source::COMMANDLINE);
+    cfg.apply_quality();
+    EXPECT_TRUE(cfg.monochrome.value());
+    EXPECT_EQ(cfg.bounce.value(), 1);
+    EXPECT_EQ(cfg.bouncecolorscale.value(), 1);
+    EXPECT_FALSE(cfg.dirt.value());
+    EXPECT_EQ(cfg.filter.value(), lightmap_filter_t::MITCHELL);
+    EXPECT_FALSE(cfg.lightmap_scale.is_changed());
+    EXPECT_FALSE(cfg.world_units_per_luxel.is_changed());
+    EXPECT_FALSE(cfg.lmshift.is_changed());
+    EXPECT_FLOAT_EQ(LightmapLuminance(qvec3f{100, 100, 100})[0], 100);
+    EXPECT_NEAR(LightmapLuminance(qvec3f{255, 0, 0})[0], 54.213, 0.001);
+}
+
+TEST(quality, EnhancedCompileNormalizesSourcesAndWritesMonochrome)
+{
+    const auto result = QbspVisLight_Q1("q1_lightignore.map",
+        {"-look", "enhanced", "-samples", "2", "-light_samples", "8", "-bouncelightsubdivision", "64"});
+    EXPECT_GT(result.bsp.dlightdata.size(), 0);
+    EXPECT_TRUE(std::holds_alternative<lit_none>(result.lit));
+    float weights = 0;
+    for (const auto &light : GetLights()) {
+        EXPECT_TRUE(light->area_weighted);
+        weights += light->sample_weight;
+    }
+    EXPECT_EQ(GetLights().size(), 8);
+    EXPECT_NEAR(weights, 1, 1e-6);
+}
+
+TEST(quality, SourceSampleCountPreservesLinearLightBrightness)
+{
+    const auto point = QbspVisLight_Q1("q1_lightignore.map",
+        {"-look", "enhanced", "-samples", "2", "-bounce", "0", "-light_radius", "0"});
+    const auto area = QbspVisLight_Q1("q1_lightignore.map",
+        {"-look", "enhanced", "-samples", "2", "-bounce", "0", "-light_radius", "0.001", "-light_samples", "16"});
+    ASSERT_EQ(point.bsp.dlightdata.size(), area.bsp.dlightdata.size());
+    for (size_t i = 0; i < point.bsp.dlightdata.size(); ++i)
+        EXPECT_LE(std::abs(int(point.bsp.dlightdata[i]) - int(area.bsp.dlightdata[i])), 2);
+}
+
+
+TEST(quality, GammaIsAppliedAfterLinearCoverageIntegration)
+{
+    std::vector<qvec4f> input(4 * 4, qvec4f{0, 0, 0, 1});
+    for (int i = 8; i < 16; ++i)
+        input[i] = qvec4f{255, 255, 255, 1};
+    const auto average = ReconstructLightmap(input, 4, 4, 4, lightmap_filter_t::BOX);
+    const auto output = EncodeLightmapColor(average[0].xyz(), 2.0f, true, true);
+    EXPECT_NEAR(output[0], std::sqrt(0.5f) * 255, 0.001);
+    EXPECT_EQ(output[0], output[1]);
+    // Legacy path has already applied gamma upstream, so must not apply it twice.
+    EXPECT_EQ(EncodeLightmapColor(qvec3f{123}, 2.0f, false, false), qvec3f{123});
 }

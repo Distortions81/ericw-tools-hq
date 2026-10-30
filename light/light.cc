@@ -287,6 +287,20 @@ light_settings::light_settings()
     : quality{this, "quality", quality_t::standard,
           {{"standard", quality_t::standard}, {"high", quality_t::high}, {"max", quality_t::max}},
           &performance_group, "sampling quality: standard, high (16x16), max (32x32); same output resolution"},
+      filter{this, "filter", lightmap_filter_t::BOX,
+          {{"box", lightmap_filter_t::BOX}, {"tent", lightmap_filter_t::TENT},
+              {"mitchell", lightmap_filter_t::MITCHELL}, {"lanczos3", lightmap_filter_t::LANCZOS3}},
+          &postprocessing_group, "supersample reconstruction kernel: box, tent, mitchell, lanczos3"},
+      samplepattern{this, "samplepattern", sample_pattern_t::GRID,
+          {{"grid", sample_pattern_t::GRID}, {"stratified", sample_pattern_t::STRATIFIED}},
+          &performance_group, "supersample placement: grid or deterministic stratified jitter"},
+      look{this, "look", lightmap_look_t::ORIGINAL,
+          {{"original", lightmap_look_t::ORIGINAL}, {"enhanced", lightmap_look_t::ENHANCED}},
+          &postprocessing_group, "enhanced: soft sources, texture-aware bounce and monochrome output at original resolution"},
+      monochrome{this, "monochrome", false, &output_group, "convert final lighting to luminance before quantization"},
+      linearfilter{this, "linearfilter", false, &postprocessing_group, "filter linear lighting before applying output gamma"},
+      light_radius{this, "light_radius", 0, 0, 256, &performance_group, "default source radius in enhanced look; preserves authored _deviance"},
+      light_samples{this, "light_samples", 64, 1, 4096, &performance_group, "default source samples in enhanced look; preserves authored _samples"},
       dither{this, "dither", false, &postprocessing_group, "deterministic sub-byte dithering of 8-bit lightmaps"},
       noiseshape{this, "noiseshape", false, &postprocessing_group, "diffuse final 8-bit quantization error (Floyd-Steinberg)"},
       surflight_dump{this, "surflight_dump", false, &debug_group, "dump surface lights to a .map file"},
@@ -481,6 +495,7 @@ void light_settings::initialize(int argc, const char **argv)
         }
 
         sourceMap = remainder[0];
+        apply_quality();
     } catch (parse_exception &ex) {
         print_help(false);
         logging::print("ERROR OCCURRED WHEN TRYING TO PARSE ARGUMENTS:\n");
@@ -492,10 +507,21 @@ void light_settings::initialize(int argc, const char **argv)
 
 void light_settings::apply_quality()
 {
+    if (look.value() == lightmap_look_t::ENHANCED) {
+        quality.set_value(quality_t::max, source::IMPLIED);
+        monochrome.set_value(true, source::IMPLIED);
+        light_radius.set_value(8, source::IMPLIED);
+        bounce.set_value(2, source::IMPLIED);
+        bouncecolorscale.set_value(1, source::IMPLIED);
+    }
+    if (filter.value() != lightmap_filter_t::BOX || monochrome.value() || quality.value() != quality_t::standard)
+        linearfilter.set_value(true, source::IMPLIED);
     if (quality.value() == quality_t::standard)
         return;
     const bool maximum = quality.value() == quality_t::max;
     extra.set_value(maximum ? 32 : 16, source::IMPLIED);
+    filter.set_value(lightmap_filter_t::MITCHELL, source::IMPLIED);
+    samplepattern.set_value(sample_pattern_t::STRATIFIED, source::IMPLIED);
     sunsamples.set_value(maximum ? 4096 : 1024, source::IMPLIED);
     dirtangle_steps.set_value(maximum ? 64 : 32, source::IMPLIED);
     dirtelevation_steps.set_value(maximum ? 12 : 6, source::IMPLIED);
@@ -1132,6 +1158,8 @@ static void FindDebugVert(const mbsp_t *bsp)
 
 void SetLitNeeded(const bspdata_t &bspdata)
 {
+    if (light_options.monochrome.value())
+        return;
     if (bspdata.loadversion->game->has_rgb_lightmap) {
         return;
     }

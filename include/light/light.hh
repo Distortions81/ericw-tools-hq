@@ -165,6 +165,11 @@ enum class debugmodes
     mottle
 };
 
+enum class lightmap_look_t { ORIGINAL, ENHANCED };
+enum class sample_pattern_t { GRID, STRATIFIED };
+
+enum class lightmap_filter_t { BOX, TENT, MITCHELL, LANCZOS3 };
+
 enum class lightfile_t
 {
     // no auxiliary lighting formats
@@ -392,6 +397,13 @@ public:
     void CheckNoDebugModeSet();
 
     setting_enum<quality_t> quality;
+    setting_enum<lightmap_filter_t> filter;
+    setting_enum<sample_pattern_t> samplepattern;
+    setting_enum<lightmap_look_t> look;
+    setting_bool monochrome;
+    setting_bool linearfilter;
+    setting_scalar light_radius;
+    setting_int32 light_samples;
     setting_bool dither;
     setting_bool noiseshape;
     void apply_quality();

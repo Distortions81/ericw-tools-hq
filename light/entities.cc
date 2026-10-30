@@ -18,6 +18,7 @@
 */
 
 #include <light/entities.hh>
+#include <light/sampling.hh>
 
 #include <algorithm>
 #include <cstring>
@@ -341,6 +342,15 @@ static void CheckEntityFields(const mbsp_t *bsp, const settings::worldspawn_keys
         entity->light.set_value(0.0f, settings::source::MAP);
     }
 
+    if (light_options.look.value() == lightmap_look_t::ENHANCED && !entity->sun.value() &&
+        !entity->nostaticlight.value() && !entity->sunlight2.value() && !entity->sunlight3.value() &&
+        entity->light.value() > 0 && entity->getFormula() != LF_LOCALMIN &&
+        entity->getFormula() != LF_QRAD3) {
+        entity->deviance.set_value(light_options.light_radius.value(), settings::source::IMPLIED);
+        entity->samples.set_value(light_options.light_samples.value(), settings::source::IMPLIED);
+        entity->area_weighted = entity->deviance.value() > 0;
+    }
+
     /* set up deviance and samples defaults */
     if (entity->deviance.value() > 0 && entity->samples.value() == 0) {
         entity->samples.set_value(16, settings::source::MAP);
@@ -353,7 +363,9 @@ static void CheckEntityFields(const mbsp_t *bsp, const settings::worldspawn_keys
 
     /* For most formulas, we need to divide the light value by the number of
        samples (jittering) to keep the brightness approximately the same. */
-    if (entity->getFormula() == LF_INVERSE || entity->getFormula() == LF_INVERSE2 ||
+    if (entity->area_weighted) {
+        entity->sample_weight = 1.0f / entity->samples.value();
+    } else if (entity->getFormula() == LF_INVERSE || entity->getFormula() == LF_INVERSE2 ||
         entity->getFormula() == LF_INFINITE || (entity->getFormula() == LF_LOCALMIN && cfg.addminlight.value()) ||
         entity->getFormula() == LF_INVERSE2A) {
         entity->light.set_value(entity->light.value() / entity->samples.value(), settings::source::MAP);
@@ -657,6 +669,8 @@ static std::unique_ptr<light_t> DuplicateEntity(const light_t &src)
     entity->copy_from(src);
 
     // copy other members
+    entity->area_weighted = src.area_weighted;
+    entity->sample_weight = src.sample_weight;
     entity->spotlight = src.spotlight;
     entity->spotvec = src.spotvec;
     entity->spotfalloff = src.spotfalloff;
@@ -695,10 +709,32 @@ static void JitterEntity(const light_t &entity)
         auto &light2 = new_lights.emplace_back(DuplicateEntity(entity));
         light2->generated = true; // don't write generated light to bsp
 
-        /* jitter it */
-        qvec3f neworigin = {(entity.origin.value())[0] + (Random() * 2.0f - 1.0f) * entity.deviance.value(),
-            (entity.origin.value())[1] + (Random() * 2.0f - 1.0f) * entity.deviance.value(),
-            (entity.origin.value())[2] + (Random() * 2.0f - 1.0f) * entity.deviance.value()};
+        qvec3f neworigin;
+        if (entity.area_weighted) {
+            const auto origin = entity.origin.value();
+            const uint32_t seed = LightSampleHash(static_cast<uint32_t>(std::abs(origin[0] * 16))) ^
+                LightSampleHash(static_cast<uint32_t>(std::abs(origin[1] * 16)) + 0x9e3779b9u) ^
+                LightSampleHash(static_cast<uint32_t>(std::abs(origin[2] * 16)) + 0x85ebca6bu);
+            const qvec3f offset = PairedAreaLightOffset(j, entity.samples.value(), seed) * entity.deviance.value();
+            const float distance = qv::length(offset);
+            neworigin = origin + offset;
+            if (distance > 0) {
+                // Keep the emitter footprint on the source's side of shadow-casting walls.
+                // Otherwise generated samples can sit inside a wall and lose their energy.
+                raystream_intersection_t rays;
+                rays.pushRay(0, origin, offset / distance, distance);
+                rays.tracePushedRaysIntersection(nullptr, entity.shadow_channel_mask.value());
+                if (rays.getPushedRayHitType(0) == hittype_t::SOLID ||
+                    rays.getPushedRayHitType(0) == hittype_t::SKY) {
+                    const float length = std::max(0.0f, rays.getPushedRayHitDist(0) - 0.25f);
+                    neworigin = origin + offset * (length / distance);
+                }
+            }
+        } else {
+            neworigin = {(entity.origin.value())[0] + (Random() * 2.0f - 1.0f) * entity.deviance.value(),
+                (entity.origin.value())[1] + (Random() * 2.0f - 1.0f) * entity.deviance.value(),
+                (entity.origin.value())[2] + (Random() * 2.0f - 1.0f) * entity.deviance.value()};
+        }
         light2->origin.set_value(neworigin, settings::source::MAP);
     }
 
@@ -941,6 +977,8 @@ void LoadEntities(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
             logging::print("WARNING: worldspawn key {} has invalid value of \"{}\"\n", epair.first, epair.second);
         }
     }
+
+    light_options.apply_quality();
 
     /* apply side effects of settings (in particular "dirt") */
     FixupGlobalSettings();
@@ -1224,6 +1262,9 @@ void SetupLights(const settings::worldspawn_keys &cfg, const mbsp_t *bsp)
     MakeSurfaceLights(bsp);
 
     logging::print("SetupLights: {} after surface lights\n", all_lights.size());
+
+    if (light_options.look.value() == lightmap_look_t::ENHANCED)
+        FixLightsOnFaces(bsp);
 
     JitterEntities();
 
