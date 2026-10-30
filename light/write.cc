@@ -348,6 +348,51 @@ static std::vector<qvec4f> BoxBlurImage(const std::vector<qvec4f> &input, int w,
     return res;
 }
 
+// Stable per-face/luxel stochastic rounding. Shared across channels and styles.
+float LightDitherThreshold(uint32_t face, uint32_t s, uint32_t t)
+{
+    uint32_t hash = face * 0x9e3779b9u ^ s * 0x85ebca6bu ^ t * 0xc2b2ae35u;
+    hash ^= 0xa511e9b3u;
+    hash ^= hash >> 16;
+    hash *= 0x7feb352du;
+    hash ^= hash >> 15;
+    hash *= 0x846ca68bu;
+    hash ^= hash >> 16;
+    return ((hash >> 9) + 0.5f) / 8388608.0f;
+}
+
+uint8_t QuantizeLight(float value, float threshold)
+{
+    return static_cast<uint8_t>(std::floor(std::clamp(value + threshold, 0.0f, 255.0f)));
+}
+
+lightmap_quantizer_t::lightmap_quantizer_t(size_t width, bool noise_shape)
+    : current(noise_shape ? width + 2 : 0, qvec3f{0}),
+      next(noise_shape ? width + 2 : 0, qvec3f{0}), shape(noise_shape)
+{
+}
+
+qvec3b lightmap_quantizer_t::quantize(
+    const qvec3f &color, uint32_t face, uint32_t s, uint32_t t, bool dither)
+{
+    if (shape && s == 0) {
+        current.swap(next);
+        std::fill(next.begin(), next.end(), qvec3f{0});
+    }
+    const float threshold = dither ? LightDitherThreshold(face, s, t) : (shape ? 0.5f : 0.0f);
+    const qvec3f corrected = shape ? qv::min(qv::max(color + current.at(s + 1), qvec3f{0}), qvec3f{255}) : color;
+    const qvec3b result{QuantizeLight(corrected[0], threshold), QuantizeLight(corrected[1], threshold),
+        QuantizeLight(corrected[2], threshold)};
+    if (shape) {
+        const qvec3f error = corrected - qvec3f(result);
+        current.at(s + 2) += error * (7.0f / 16);
+        next.at(s) += error * (3.0f / 16);
+        next.at(s + 1) += error * (5.0f / 16);
+        next.at(s + 2) += error * (1.0f / 16);
+    }
+    return result;
+}
+
 static constexpr float HDR_ONE = 128.0f; // logical value for 1.0 lighting (quake's overbrights give 255).
 
 /**
@@ -391,6 +436,7 @@ static void WriteSingleLightmap(const mbsp_t *bsp, const mface_t *face, const li
     const int output_width = output_extents.width();
     const int output_height = output_extents.height();
 
+    lightmap_quantizer_t quantizer(output_width, light_options.noiseshape.value());
     for (int t = 0; t < output_height; t++) {
         for (int s = 0; s < output_width; s++) {
             const int input_sample_s = (s / (float)output_width) * actual_width;
@@ -417,10 +463,12 @@ static void WriteSingleLightmap(const mbsp_t *bsp, const mface_t *face, const li
                     color *= (255.0f / maxcolor);
                 }
 
+                const qvec3b quantized = quantizer.quantize(color, Face_GetNum(bsp, face), s, t,
+                    light_options.dither.value());
                 if (lit) {
-                    *lit++ = color[0];
-                    *lit++ = color[1];
-                    *lit++ = color[2];
+                    *lit++ = quantized[0];
+                    *lit++ = quantized[1];
+                    *lit++ = quantized[2];
                 }
 
                 if (out) {
@@ -431,12 +479,7 @@ static void WriteSingleLightmap(const mbsp_t *bsp, const mface_t *face, const li
 
                     This must be max(), see LightNormalize in MarkV 1036.
                     */
-                    float light = std::max({color[0], color[1], color[2]});
-                    if (light < 0)
-                        light = 0;
-                    if (light > 255)
-                        light = 255;
-                    *out++ = light;
+                    *out++ = qv::max(quantized);
                 }
             }
 
@@ -489,6 +532,7 @@ static void WriteSingleLightmap_FromDecoupled(const mbsp_t *bsp, const mface_t *
         return fullres[sampleindex];
     };
 
+    lightmap_quantizer_t quantizer(output_width, light_options.noiseshape.value());
     for (int t = 0; t < output_height; t++) {
         for (int s = 0; s < output_width; s++) {
             // convert from vanilla lm coord to decoupled lm coord
@@ -527,15 +571,16 @@ static void WriteSingleLightmap_FromDecoupled(const mbsp_t *bsp, const mface_t *
             }
 
             if (lit || out) {
+                const qvec3b quantized = quantizer.quantize(color, Face_GetNum(bsp, face), s, t,
+                    light_options.dither.value());
                 if (lit) {
-                    *lit++ = color[0];
-                    *lit++ = color[1];
-                    *lit++ = color[2];
+                    *lit++ = quantized[0];
+                    *lit++ = quantized[1];
+                    *lit++ = quantized[2];
                 }
 
                 if (out) {
-                    // FIXME: implement
-                    *out++ = 0;
+                    *out++ = (light_options.dither.value() || light_options.noiseshape.value()) ? qv::max(quantized) : 0;
                 }
             }
 

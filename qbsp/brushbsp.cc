@@ -1034,7 +1034,9 @@ static side_t *SelectSplitPlane(
 
                 for (auto &test : brushes) {
                     int bsplits;
-                    int s = TestBrushToPlanenum(*test, positive_planenum, &bsplits, &hintsplit, &epsilonbrush);
+                    bool brush_hintsplit = false;
+                    int s = TestBrushToPlanenum(*test, positive_planenum, &bsplits, &brush_hintsplit, &epsilonbrush);
+                    hintsplit |= brush_hintsplit;
 
                     splits += bsplits;
                     if (bsplits && (s & PSIDE_FACING))

@@ -447,7 +447,10 @@ inline void set_target_version(const bspversion_t *version)
 }
 
 qbsp_settings::qbsp_settings()
-    : hexen2{this, "hexen2", false, &game_target_group, "target Hexen II's BSP format"}, // tests, docs
+    : quality{this, "quality", quality_t::standard,
+          {{"standard", quality_t::standard}, {"high", quality_t::high}, {"max", quality_t::max}},
+          &performance_group, "BSP effort: standard, high, max; preserves geometry and output format"},
+      hexen2{this, "hexen2", false, &game_target_group, "target Hexen II's BSP format"}, // tests, docs
       hlbsp{this, "hlbsp", false, &game_target_group, "target Half Life's BSP format"}, // tests, docs
       q2bsp{this, "q2bsp", false, &game_target_group, "target Quake II's BSP format"}, // tests, docs
       qbism{this, "qbism", false, &game_target_group, "target Qbism's extended Quake II BSP format"}, // tests, docs
@@ -574,6 +577,17 @@ qbsp_settings::qbsp_settings()
 {
 }
 
+void qbsp_settings::apply_quality()
+{
+    if (quality.value() != quality_t::standard) {
+        forcegoodtree.set_value(true, source::IMPLIED);
+        maxnodesize.set_value(0, source::IMPLIED);
+        midsplitsurffraction.set_value(0, source::IMPLIED);
+        midsplitbrushfraction.set_value(0, source::IMPLIED);
+        tjunc.set_value(tjunclevel_t::MWT, source::IMPLIED);
+    }
+}
+
 void qbsp_settings::set_parameters(int argc, const char **argv)
 {
     common_settings::set_parameters(argc, argv);
@@ -597,6 +611,7 @@ void qbsp_settings::initialize(int argc, const char **argv)
             print_help(true);
         }
 
+        apply_quality();
         qbsp_options.map_path = remainder[0];
 
         if (remainder.size() == 2) {

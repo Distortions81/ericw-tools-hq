@@ -2227,11 +2227,7 @@ static void LightFace_DebugNeighbours(const mbsp_t *bsp, lightsurf_t *lightsurf,
 
 /* Dirtmapping borrowed from q3map2, originally by RaP7oR */
 
-constexpr size_t DIRT_NUM_ANGLE_STEPS = 16;
-constexpr size_t DIRT_NUM_ELEVATION_STEPS = 3;
-constexpr size_t DIRT_NUM_VECTORS = (DIRT_NUM_ANGLE_STEPS * DIRT_NUM_ELEVATION_STEPS);
-
-static qvec3f dirtVectors[DIRT_NUM_VECTORS];
+static std::vector<qvec3f> dirtVectors;
 int numDirtVectors = 0;
 
 /*
@@ -2275,16 +2271,18 @@ void SetupDirt(settings::worldspawn_keys &cfg)
     logging::funcheader();
 
     /* calculate angular steps */
-    constexpr float angleStep = (float)DEG2RAD(360.0f / DIRT_NUM_ANGLE_STEPS);
-    const float elevationStep = (float)DEG2RAD(cfg.dirtangle.value() / DIRT_NUM_ELEVATION_STEPS);
+    const float angleStep = (float)DEG2RAD(360.0f / cfg.dirtangle_steps.value());
+    const float elevationStep = (float)DEG2RAD(cfg.dirtangle.value() / cfg.dirtelevation_steps.value());
+
+    dirtVectors.resize(cfg.dirtangle_steps.value() * cfg.dirtelevation_steps.value());
 
     /* iterate angle */
     float angle = 0.0f;
     numDirtVectors = 0;
-    for (int i = 0; i < DIRT_NUM_ANGLE_STEPS; i++, angle += angleStep) {
+    for (int i = 0; i < cfg.dirtangle_steps.value(); i++, angle += angleStep) {
         /* iterate elevation */
         float elevation = elevationStep * 0.5f;
-        for (int j = 0; j < DIRT_NUM_ELEVATION_STEPS; j++, elevation += elevationStep) {
+        for (int j = 0; j < cfg.dirtelevation_steps.value(); j++, elevation += elevationStep) {
             dirtVectors[numDirtVectors][0] = sin(elevation) * cos(angle);
             dirtVectors[numDirtVectors][1] = sin(elevation) * sin(angle);
             dirtVectors[numDirtVectors][2] = cos(elevation);

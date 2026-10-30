@@ -191,7 +191,7 @@ if(NOT DISABLE_DOCS)
 	add_subdirectory(docs)
 endif ()
 
-install(FILES README.md DESTINATION .)
+install(FILES README.md QUALITY.md DESTINATION .)
 
 #CPack configuration
 

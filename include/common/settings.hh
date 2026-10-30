@@ -57,6 +57,9 @@ struct quit_after_help_exception : public std::exception
 {
 };
 
+// Opt-in compile effort; never changes output lightmap density.
+enum class quality_t { standard, high, max };
+
 enum class source
 {
     DEFAULT,

@@ -163,6 +163,9 @@ public:
 class qbsp_settings : public common_settings
 {
 public:
+    setting_enum<quality_t> quality;
+    void apply_quality();
+
     setting_bool hexen2;
     setting_bool hlbsp;
     setting_bool q2bsp;

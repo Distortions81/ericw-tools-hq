@@ -313,6 +313,8 @@ public:
     setting_scalar dirtscale;
     setting_scalar dirtgain;
     setting_scalar dirtangle;
+    setting_int32 dirtangle_steps;
+    setting_int32 dirtelevation_steps;
     setting_bool minlight_dirt;
 
     /* phong */
@@ -377,10 +379,10 @@ public:
         std::string format() const override;
     };
 
-    class setting_extra : public setting_value<int32_t>
+    class setting_extra : public setting_int32
     {
     public:
-        using setting_value::setting_value;
+        using setting_int32::setting_int32;
 
         bool parse(const std::string &setting_name, parser_base_t &parser, source source) override;
         std::string string_value() const override;
@@ -388,6 +390,11 @@ public:
     };
 
     void CheckNoDebugModeSet();
+
+    setting_enum<quality_t> quality;
+    setting_bool dither;
+    setting_bool noiseshape;
+    void apply_quality();
 
     setting_bool surflight_dump;
     setting_scalar surflight_subdivide;

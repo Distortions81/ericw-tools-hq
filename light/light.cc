@@ -184,6 +184,8 @@ worldspawn_keys::worldspawn_keys()
       dirtscale{this, "dirtscale", 1.0, 0.0, 100.0, &worldspawn_group},
       dirtgain{this, "dirtgain", 1.0, 0.0, 100.0, &worldspawn_group},
       dirtangle{this, "dirtangle", 88.0, 1.0, 90.0, &worldspawn_group},
+      dirtangle_steps{this, "dirtangle_steps", 16, 1, 256, &worldspawn_group, "AO azimuth samples"},
+      dirtelevation_steps{this, "dirtelevation_steps", 3, 1, 64, &worldspawn_group, "AO elevation samples"},
       minlight_dirt{this, "minlight_dirt", false, &worldspawn_group},
       phongallowed{this, "phong", true, &worldspawn_group},
       phongangle{this, "phong_angle", 0, &worldspawn_group},
@@ -251,12 +253,10 @@ std::string light_settings::setting_soft::format() const
 
 bool light_settings::setting_extra::parse(const std::string &setting_name, parser_base_t &parser, source source)
 {
-    if (setting_name.back() == '4') {
-        set_value(4, source);
-    } else {
-        set_value(2, source);
+    if (setting_name == "samples") {
+        return setting_int32::parse(setting_name, parser, source);
     }
-
+    set_value(setting_name == "extra" ? 2 : std::stoi(setting_name.substr(5)), source);
     return true;
 }
 
@@ -284,14 +284,19 @@ setting_group postprocessing_group{"Postprocessing options", 50, expected_source
 setting_group experimental_group{"Experimental options", 60, expected_source::commandline};
 
 light_settings::light_settings()
-    : surflight_dump{this, "surflight_dump", false, &debug_group, "dump surface lights to a .map file"},
+    : quality{this, "quality", quality_t::standard,
+          {{"standard", quality_t::standard}, {"high", quality_t::high}, {"max", quality_t::max}},
+          &performance_group, "sampling quality: standard, high (16x16), max (32x32); same output resolution"},
+      dither{this, "dither", false, &postprocessing_group, "deterministic sub-byte dithering of 8-bit lightmaps"},
+      noiseshape{this, "noiseshape", false, &postprocessing_group, "diffuse final 8-bit quantization error (Floyd-Steinberg)"},
+      surflight_dump{this, "surflight_dump", false, &debug_group, "dump surface lights to a .map file"},
       surflight_subdivide{
           this, "surflight_subdivide", 128.0, 1.0, 2048.0, &performance_group, "surface light subdivision size"},
       onlyents{this, "onlyents", false, &output_group, "only update entities"},
       write_normals{this, "wrnormals", false, &output_group, "output normals, tangents and bitangents in a BSPX lump"},
       novanilla{this, "novanilla", false, &experimental_group, "implies -bspxlit; don't write vanilla lighting"},
       gate{this, "gate", LIGHT_EQUAL_EPSILON, &performance_group, "cutoff lights at this brightness level"},
-      sunsamples{this, "sunsamples", 64, 8, 2048, &performance_group, "set samples for _sunlight2, default 64"},
+      sunsamples{this, "sunsamples", 64, 8, 16384, &performance_group, "set samples for _sunlight2, default 64"},
       arghradcompat{this, "arghradcompat", false, &output_group, "enable compatibility for Arghrad-specific keys"},
       nolighting{this, "nolighting", false, &output_group, "don't output main world lighting (Q2RTX)"},
       debugface{this, "debugface", std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN(),
@@ -306,7 +311,8 @@ light_settings::light_settings()
       lightmap_scale{
           this, "lightmap_scale", 0, &experimental_group, "force change lightmap scale; vanilla engines only allow 16"},
       extra{
-          this, {"extra", "extra4"}, 1, &performance_group, "supersampling; 2x2 (extra) or 4x4 (extra4) respectively"},
+          this, {"extra", "extra4", "extra8", "extra16", "extra32", "samples"}, 1, 1, 32, &performance_group,
+          "supersampling per axis: extra=2, extra4/8/16/32 or samples N (1..32); output resolution unchanged"},
       emissivequality{this, "emissivequality", emissivequality_t::LOW,
           {{"LOW", emissivequality_t::LOW}, {"MEDIUM", emissivequality_t::MEDIUM}, {"HIGH", emissivequality_t::HIGH}},
           &performance_group,
@@ -484,8 +490,28 @@ void light_settings::initialize(int argc, const char **argv)
     }
 }
 
+void light_settings::apply_quality()
+{
+    if (quality.value() == quality_t::standard)
+        return;
+    const bool maximum = quality.value() == quality_t::max;
+    extra.set_value(maximum ? 32 : 16, source::IMPLIED);
+    sunsamples.set_value(maximum ? 4096 : 1024, source::IMPLIED);
+    dirtangle_steps.set_value(maximum ? 64 : 32, source::IMPLIED);
+    dirtelevation_steps.set_value(maximum ? 12 : 6, source::IMPLIED);
+    gate.set_value(0, source::IMPLIED);
+    emissivequality.set_value(emissivequality_t::HIGH, source::IMPLIED);
+    visapprox.set_value(visapprox_t::NONE, source::IMPLIED);
+    bouncelightsubdivision.set_value(maximum ? 8 : 16, source::IMPLIED);
+    surflight_subdivide.set_value(maximum ? 32 : 64, source::IMPLIED);
+    surflightsubdivision.set_value(maximum ? 4 : 8, source::IMPLIED);
+    dither.set_value(true, source::IMPLIED);
+    noiseshape.set_value(true, source::IMPLIED);
+}
+
 void light_settings::light_postinitialize(int argc, const char **argv)
 {
+    apply_quality();
     if (gate.value() > 1) {
         logging::print("WARNING: -gate value greater than 1 may cause artifacts\n");
     }
@@ -497,11 +523,7 @@ void light_settings::light_postinitialize(int argc, const char **argv)
     }
 
     if (soft.value() == -1) {
-        switch (extra.value()) {
-            case 2: soft.set_value(1, settings::source::COMMANDLINE); break;
-            case 4: soft.set_value(2, settings::source::COMMANDLINE); break;
-            default: soft.set_value(0, settings::source::COMMANDLINE); break;
-        }
+        soft.set_value(extra.value() / 2, settings::source::COMMANDLINE);
     }
 
     if (litonly.value()) {

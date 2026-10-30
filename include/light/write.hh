@@ -45,4 +45,17 @@ void WriteLitFile(const mbsp_t *bsp, const std::vector<facesup_t> &facesup, cons
     const std::vector<uint8_t> &hdr_filebase);
 void WriteLuxFile(const mbsp_t *bsp, const fs::path &filename, int version, const std::vector<uint8_t> &lux_filebase);
 
+// One instance per face/style; no shared state or scheduling-dependent RNG.
+class lightmap_quantizer_t
+{
+    std::vector<qvec3f> current, next;
+    bool shape;
+public:
+    lightmap_quantizer_t(size_t width, bool noise_shape);
+    qvec3b quantize(const qvec3f &color, uint32_t face, uint32_t s, uint32_t t, bool dither);
+};
+
+uint8_t QuantizeLight(float value, float threshold);
+float LightDitherThreshold(uint32_t face, uint32_t s, uint32_t t);
+
 void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source);
